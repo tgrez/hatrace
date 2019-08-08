@@ -76,6 +76,8 @@ module System.Hatrace
   , SyscallExitDetails_set_tid_address(..)
   , SyscallEnterDetails_sysinfo(..)
   , SyscallExitDetails_sysinfo(..)
+  , SyscallEnterDetails_sendmsg(..)
+  , SyscallExitDetails_sendmsg(..)
   , DetailedSyscallEnter(..)
   , DetailedSyscallExit(..)
   , ERRNO(..)
