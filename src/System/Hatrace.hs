@@ -81,6 +81,7 @@ module System.Hatrace
   , ERRNO(..)
   , foreignErrnoToERRNO
   , getSyscallEnterDetails
+  , setExitedSyscallResult
   , syscallEnterDetailsOnlyConduit
   , syscallExitDetailsOnlyConduit
   , FileWriteEvent(..)
@@ -1592,6 +1593,14 @@ getSyscallExitDetails' knownSyscall syscallArgs result pid =
 
             DetailedSyscallEnter_unimplemented syscall _syscallArgs ->
               pure $ DetailedSyscallExit_unimplemented syscall syscallArgs result
+
+setExitedSyscallResult :: CPid -> CULong -> IO ()
+setExitedSyscallResult cpid newRetVal = do
+  regs <- annotatePtrace "setExitedSyscallResult: ptrace_getregs" $ ptrace_getregs cpid
+  let newRegs = case regs of
+        X86 r -> X86 r { eax = fromIntegral newRetVal }
+        X86_64 r -> X86_64 r { rax = fromIntegral newRetVal }
+  annotatePtrace "setExitedSyscallResult: ptrace_setregs" $ ptrace_setregs cpid newRegs
 
 checkedFromIntegral :: Integral a => a -> Int
 checkedFromIntegral a =
