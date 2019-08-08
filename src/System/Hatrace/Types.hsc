@@ -3,6 +3,8 @@
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <asm/prctl.h>
+#include <sys/uio.h>
+#include <sys/socket.h>
 
 module System.Hatrace.Types
   ( FileAccessMode(..)
@@ -13,15 +15,20 @@ module System.Hatrace.Types
   , ArchPrctlSubfunction(..)
   , CIntRepresentable(..)
   , SysinfoStruct(..)
+  , MsgHdrStruct(..)
+  , IoVec(..)
   ) where
 
 import           Data.Bits
 import           Data.List (intercalate)
-import           Foreign.C.Types (CUShort(..), CInt(..), CUInt(..), CLong(..), CULong(..))
+import           Foreign.C.Types (CUShort(..), CInt(..), CUInt(..), CLong(..), CULong(..), CSize(..))
 import           Foreign.Marshal.Array (peekArray, pokeArray)
-import           Foreign.Ptr (plusPtr)
+import           Foreign.Ptr (Ptr, plusPtr)
 import           Foreign.Storable (Storable(..))
 import           System.Hatrace.Format
+import           Data.Word (Word8)
+
+import           Data.Void
 
 -- | Helper type class for int-sized enum-like types
 class CIntRepresentable a where
@@ -259,3 +266,50 @@ instance Storable SysinfoStruct where
     #{poke struct sysinfo, totalhigh} p totalhigh
     #{poke struct sysinfo, freehigh} p freehigh
     #{poke struct sysinfo, mem_unit} p mem_unit
+
+data MsgHdrStruct = MsgHdrStruct
+  { msg_name :: Ptr Void
+  , msg_namelen :: CUInt
+  , msg_iov :: Ptr IoVec
+  , msg_iovlen :: CSize
+  , msg_control :: Ptr Void
+  , msg_controllen :: CSize
+  , msg_flags :: CInt
+  } deriving (Eq, Ord, Show)
+
+instance Storable MsgHdrStruct where
+  sizeOf _ = #{size struct msghdr}
+  alignment _ = #{alignment struct msghdr}
+  peek p = do
+    msg_name <- #{peek struct msghdr, msg_name} p
+    msg_namelen <- #{peek struct msghdr, msg_namelen} p
+    msg_iov <- #{peek struct msghdr, msg_iov} p
+    msg_iovlen <- #{peek struct msghdr, msg_iovlen} p
+    msg_control <- #{peek struct msghdr, msg_control} p
+    msg_controllen <- #{peek struct msghdr, msg_controllen} p
+    msg_flags <- #{peek struct msghdr, msg_flags} p
+    return $ MsgHdrStruct{..}
+  poke p MsgHdrStruct{..} = do
+    #{poke struct msghdr, msg_name} p msg_name
+    #{poke struct msghdr, msg_namelen} p msg_namelen
+    #{poke struct msghdr, msg_iov} p msg_iov
+    #{poke struct msghdr, msg_iovlen} p msg_iovlen
+    #{poke struct msghdr, msg_control} p msg_control
+    #{poke struct msghdr, msg_controllen} p msg_controllen
+    #{poke struct msghdr, msg_flags} p msg_flags
+
+data IoVec = IoVec
+  { iov_base :: Ptr Word8
+  , iov_len :: CSize
+  } deriving (Eq, Ord, Show)
+
+instance Storable IoVec where
+  sizeOf _ = #{size struct iovec}
+  alignment _ = #{alignment struct iovec}
+  peek p = do
+    iov_base <- #{peek struct iovec, iov_base} p
+    iov_len <- #{peek struct iovec, iov_len} p
+    return $ IoVec{..}
+  poke p IoVec{..} = do
+    #{poke struct iovec, iov_base} p iov_base
+    #{poke struct iovec, iov_len} p iov_len

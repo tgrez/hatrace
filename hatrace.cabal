@@ -80,6 +80,7 @@ test-suite hatrace-test
                      , temporary
                      , text
                      , unix
+                     , unix-bytestring
                      , unliftio
                      , unliftio-core
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N

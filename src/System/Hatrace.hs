@@ -4,6 +4,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Note about __safety of ptrace() in multi-threaded tracers__:
 --
@@ -125,9 +126,10 @@ import           Foreign.C.Types (CInt(..), CLong(..), CULong(..), CChar(..), CS
 import           Foreign.ForeignPtr (withForeignPtr)
 import           Foreign.Marshal.Alloc (alloca)
 import           Foreign.Marshal.Array (withArray)
+import qualified Foreign.Marshal.Array (peekArray)
 import           Foreign.Marshal.Utils (withMany)
-import           Foreign.Ptr (Ptr, nullPtr, wordPtrToPtr)
-import           Foreign.Storable (peekByteOff, sizeOf)
+import           Foreign.Ptr (castPtr, Ptr, nullPtr, wordPtrToPtr)
+import           Foreign.Storable (Storable, peekByteOff, sizeOf)
 import           GHC.Stack (HasCallStack, callStack, getCallStack, prettySrcLoc)
 import           System.Directory (canonicalizePath, doesFileExist, findExecutable)
 import           System.Exit (ExitCode(..), die)
@@ -1024,6 +1026,25 @@ instance SyscallExitFormatting SyscallExitDetails_sysinfo where
   syscallExitToFormatted SyscallExitDetails_sysinfo{ sysinfo } =
     (FormattedSyscall "sysinfo" [formatArg sysinfo], NoReturn)
 
+data SyscallEnterDetails_sendmsg = SyscallEnterDetails_sendmsg
+  { sockfd :: CInt
+  , msgHdrPtr :: Ptr MsgHdrStruct
+  , flags :: CInt
+  } deriving (Eq, Ord, Show)
+
+instance SyscallEnterFormatting SyscallEnterDetails_sendmsg where
+  syscallEnterToFormatted SyscallEnterDetails_sendmsg{ sockfd, flags } =
+    FormattedSyscall "sendmsg" [formatArg sockfd, formatArg flags]
+
+data SyscallExitDetails_sendmsg = SyscallExitDetails_sendmsg
+  { enterDetail :: SyscallEnterDetails_sendmsg
+  , msgHdr :: MsgHdrStruct
+  , bytesSent :: ByteString
+  } deriving (Eq, Ord, Show)
+
+instance SyscallExitFormatting SyscallExitDetails_sendmsg where
+  syscallExitToFormatted SyscallExitDetails_sendmsg{ } =
+    (FormattedSyscall "sendmsg" [], NoReturn)
 
 data DetailedSyscallEnter
   = DetailedSyscallEnter_open SyscallEnterDetails_open
@@ -1053,6 +1074,7 @@ data DetailedSyscallEnter
   | DetailedSyscallEnter_arch_prctl SyscallEnterDetails_arch_prctl
   | DetailedSyscallEnter_set_tid_address SyscallEnterDetails_set_tid_address
   | DetailedSyscallEnter_sysinfo SyscallEnterDetails_sysinfo
+  | DetailedSyscallEnter_sendmsg SyscallEnterDetails_sendmsg
   | DetailedSyscallEnter_unimplemented Syscall SyscallArgs
   deriving (Eq, Ord, Show)
 
@@ -1085,6 +1107,7 @@ data DetailedSyscallExit
   | DetailedSyscallExit_arch_prctl SyscallExitDetails_arch_prctl
   | DetailedSyscallExit_set_tid_address SyscallExitDetails_set_tid_address
   | DetailedSyscallExit_sysinfo SyscallExitDetails_sysinfo
+  | DetailedSyscallExit_sendmsg SyscallExitDetails_sendmsg
   | DetailedSyscallExit_unimplemented Syscall SyscallArgs Word64
   deriving (Eq, Ord, Show)
 
@@ -1363,7 +1386,15 @@ getSyscallEnterDetails syscall syscallArgs pid = let proc = TracedProcess pid in
     let tidptr = word64ToPtr pidAddr
     pure $ DetailedSyscallEnter_set_tid_address $ SyscallEnterDetails_set_tid_address
       { tidptr
-      } 
+      }
+  Syscall_sendmsg -> do
+    let SyscallArgs{ arg0 = sockfd, arg1 = msgHdrAddr, arg2 = flags } = syscallArgs
+    let msgHdrPtr = word64ToPtr msgHdrAddr
+    pure $ DetailedSyscallEnter_sendmsg $ SyscallEnterDetails_sendmsg
+      { sockfd = fromIntegral sockfd
+      , msgHdrPtr
+      , flags = fromIntegral flags
+      }
   _ -> pure $ DetailedSyscallEnter_unimplemented (KnownSyscall syscall) syscallArgs
 
 
@@ -1550,8 +1581,41 @@ getSyscallExitDetails' knownSyscall syscallArgs result pid =
                 pure $ DetailedSyscallExit_sysinfo $
                   SyscallExitDetails_sysinfo{ enterDetail, sysinfo }
 
+            DetailedSyscallEnter_sendmsg
+              enterDetail@SyscallEnterDetails_sendmsg{ msgHdrPtr } -> do
+                msgHdr@MsgHdrStruct{ msg_iov, msg_iovlen } <- Ptrace.peek (TracedProcess pid) msgHdrPtr
+                let len = checkedFromIntegral msg_iovlen
+                iovectors <- peekArray (TracedProcess pid) len msg_iov
+                bytesSent <- iovecsToByteString (TracedProcess pid) result iovectors
+                pure $ DetailedSyscallExit_sendmsg $
+                  SyscallExitDetails_sendmsg{ enterDetail, msgHdr, bytesSent }
+
             DetailedSyscallEnter_unimplemented syscall _syscallArgs ->
               pure $ DetailedSyscallExit_unimplemented syscall syscallArgs result
+
+checkedFromIntegral :: Integral a => a -> Int
+checkedFromIntegral a =
+  let b = fromIntegral a
+  in if fromIntegral b == a then b else maxBound :: Int
+
+iovecsToByteString :: TracedProcess -> Word64 -> [IoVec] -> IO ByteString
+iovecsToByteString _ _ [] = pure ""
+iovecsToByteString _ 0 _ = pure ""
+  -- TODO pattern match on many iovecs
+iovecsToByteString pid sizeReceived (IoVec{iov_base}:_) = do
+  let len = checkedFromIntegral sizeReceived
+  bytes <- peekArray pid len iov_base
+  pure $ BS.pack bytes
+
+peekArray :: Storable a => TracedProcess -> Int -> Ptr a -> IO [a]
+peekArray pid size ptr
+  | size <= 0 = return []
+  | otherwise = do
+      arrayBytes <- Ptrace.peekBytes pid ptr (size * elemSize)
+      let (tmpPtr, _, _) = BSI.toForeignPtr arrayBytes
+      withForeignPtr tmpPtr (\p -> Foreign.Marshal.Array.peekArray size (castPtr p))
+      where
+        elemSize = sizeOf ptr
 
 readPipeFds :: CPid -> Ptr CInt -> IO (CInt, CInt)
 readPipeFds pid pipefd = do
@@ -1934,6 +1998,8 @@ formatSyscallEnter syscall syscallArgs pid =
 
         DetailedSyscallEnter_sysinfo details -> syscallEnterToFormatted details
 
+        DetailedSyscallEnter_sendmsg details -> syscallEnterToFormatted details
+
         DetailedSyscallEnter_execve details -> syscallEnterToFormatted details
 
         DetailedSyscallEnter_exit details -> syscallEnterToFormatted details
@@ -2028,6 +2094,8 @@ formatDetailedSyscallExit detailedExit handleUnimplemented =
     DetailedSyscallExit_set_tid_address details -> formatDetails details
 
     DetailedSyscallExit_sysinfo details -> formatDetails details
+
+    DetailedSyscallExit_sendmsg details -> formatDetails details
 
     DetailedSyscallExit_execve details -> formatDetails details
 
