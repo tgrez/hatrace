@@ -1596,12 +1596,19 @@ getSyscallExitDetails' knownSyscall syscallArgs result pid =
             DetailedSyscallEnter_unimplemented syscall _syscallArgs ->
               pure $ DetailedSyscallExit_unimplemented syscall syscallArgs result
 
-setExitedSyscallResult :: CPid -> CULong -> IO ()
-setExitedSyscallResult cpid newRetVal = do
+-- | Changes result of current syscall. Should be called only on exit event.
+-- For 32-bit architectures Word64 type is too large, so only the last 32 bits will be used.
+setExitedSyscallResult :: CPid -> Either ERRNO Word64 -> IO ()
+setExitedSyscallResult cpid errorOrRetValue = do
+  let newRetValue =
+        case errorOrRetValue of
+          Right num -> num
+          Left (ERRNO errno) -> fromIntegral (-errno)
   regs <- annotatePtrace "setExitedSyscallResult: ptrace_getregs" $ ptrace_getregs cpid
-  let newRegs = case regs of
-        X86 r -> X86 r { eax = fromIntegral newRetVal }
-        X86_64 r -> X86_64 r { rax = fromIntegral newRetVal }
+  let newRegs =
+        case regs of
+          X86 r -> X86 r { eax = fromIntegral newRetValue }
+          X86_64 r -> X86_64 r { rax = newRetValue }
   annotatePtrace "setExitedSyscallResult: ptrace_setregs" $ ptrace_setregs cpid newRegs
 
 checkedFromIntegral :: Integral a => a -> Int
